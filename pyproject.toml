@@ -1,0 +1,9 @@
+[project]
+name = "swissciv"
+version = "0.1.0"
+description = "A strategy-game style map of the real Switzerland, from Swiss open data"
+requires-python = ">=3.11"
+dependencies = []  # standard library only, on purpose
+
+[tool.uv]
+package = false
