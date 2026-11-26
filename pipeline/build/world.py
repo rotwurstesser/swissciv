@@ -20,14 +20,17 @@ PRODUCES = ["_world", "world.json"]
 WATER, FOREIGN = -1, -2
 LAND, OCEAN, COAST, LAKE = range(4)
 LAKE_ELEV = -40  # lakes have no depth data here; a fixed shallow value keeps the water art in its lake tones
+SHORE_MIN_POP = 500  # residents that make a mostly-lake hex a lakeside settlement instead of water
+SHORE_MIN_LAND_SAMPLES = 2  # of the 7 samples; below this the hex has no shore to put the people on
 
 WATER_TABLE = [
     {"id": LAND, "name": "Land", "rule": "Most of the hex's 7 sample points (centre + 6) are outside the BFS G1 lakes."},
     {"id": OCEAN, "name": "Ocean", "color": "#1b4266", "rule": "Not used: Switzerland has no sea."},
     {"id": COAST, "name": "Coast", "color": "#2d6d97", "rule": "Not used."},
-    {"id": LAKE, "name": "Lake", "color": "#3a80b0", "rule": "At least 4 of the hex's 7 sample points fall in a BFS G1 lake (lakes over about 5 km², border lakes in full)."},
+    {"id": LAKE, "name": "Lake", "color": "#3a80b0", "rule": f"At least 4 of the hex's 7 sample points fall in a BFS G1 lake (lakes over about 5 km², border lakes in full), unless the hex holds {SHORE_MIN_POP}+ residents and at least {SHORE_MIN_LAND_SAMPLES} land samples (a lakeside village or city)."},
 ]
-WATER_NOTE = "Lakes are the BFS generalised (G1) lake outlines; smaller lakes and rivers are narrower than a hex and are land."
+WATER_NOTE = ("Lakes are the BFS generalised (G1) lake outlines; smaller lakes and rivers are narrower than a hex and "
+              "are land. A mostly-lake hex with residents on its shore stays land, so lakeside villages show on the map.")
 
 FLAT, HILLS, MOUNTAINS, PEAKS = range(4)
 RELIEF_TABLE = [
@@ -111,6 +114,7 @@ def build() -> None:
     dhm = load_interim("swisstopo_dhm")
     areal = load_interim("bfs_arealstatistik")
     ne = load_interim("natural_earth")
+    statpop = load_interim("bfs_statpop")
 
     grid = HexGrid.covering(WIDTH_KM, HEIGHT_KM, HEX_RADIUS_KM)
     print(f"    grid {grid.cols}×{grid.rows} = {grid.size} hexes of {HEX_RADIUS_KM:g} km")
@@ -130,6 +134,15 @@ def build() -> None:
     water = [LAND] * grid.size
     county = [-1] * grid.size
     county_samples: list[list[int]] = [[] for _ in range(grid.size)]
+
+    # Residents per hex before the lake mask: a lakeside village can sit in a hex whose samples are mostly lake.
+    raw_cell_pop = [0] * grid.size
+    for e, n, v in statpop["hectares"][str(statpop["year"])]:
+        c = grid.cell_at(*lv95_to_map(e + 50, n + 50))
+        if c >= 0:
+            raw_cell_pop[c] += v
+
+    reclassified = 0
     for i in range(grid.size):
         cx, cy = grid.center(*grid.col_row(i))
         kinds = []
@@ -139,11 +152,14 @@ def build() -> None:
                 kinds.append("lake")
             else:
                 kinds.append(canton_idx.locate(x, y))  # -1 = outside Switzerland
-        if kinds.count("lake") >= 4:
-            water[i], owner[i] = LAKE, WATER
-            continue
+        lake_n = kinds.count("lake")
         land = [k for k in kinds if k != "lake"]
         ch = [k for k in land if k >= 0]
+        shore = (lake_n >= 4 and raw_cell_pop[i] >= SHORE_MIN_POP
+                 and len(ch) >= SHORE_MIN_LAND_SAMPLES and len(ch) * 2 >= len(land))
+        if lake_n >= 4 and not shore:
+            water[i], owner[i] = LAKE, WATER
+            continue
         if len(ch) * 2 >= len(land) and ch:
             owner[i] = majority(ch, kinds[0])
             smp = [commune_idx.locate(cx + dx, cy + dy) for dx, dy in offsets]
@@ -151,6 +167,10 @@ def build() -> None:
             same = [k for k in smp if k >= 0 and communes[k]["props"]["KTNR"] == owner[i] + 1]
             if same:
                 county[i] = smp[0] if smp[0] in same else Counter(same).most_common(1)[0][0]
+            if shore:
+                reclassified += 1
+    if reclassified:
+        print(f"    shore: {reclassified} lake hexes kept as land ({SHORE_MIN_POP}+ residents, >= {SHORE_MIN_LAND_SAMPLES} land samples)")
 
     # --- elevation and relief --------------------------------------------------------------------
     samples: list[list[int]] = [[] for _ in range(grid.size)]
@@ -202,12 +222,7 @@ def build() -> None:
     print("    cover:", dict(Counter(cover[i] for i in range(grid.size) if owner[i] >= 0)))
 
     # --- residents per hex (STATPOP hectare counts): city tiles are sized by them --------------------
-    statpop = load_interim("bfs_statpop")
-    cell_pop = [0] * grid.size
-    for e, n, v in statpop["hectares"][str(statpop["year"])]:
-        c = grid.cell_at(*lv95_to_map(e + 50, n + 50))
-        if c >= 0 and owner[c] >= 0:
-            cell_pop[c] += v
+    cell_pop = [raw_cell_pop[i] if owner[i] >= 0 else 0 for i in range(grid.size)]
 
     # --- rivers --------------------------------------------------------------------------------------
     rivers = []
